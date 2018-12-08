@@ -23,9 +23,11 @@ import (
 	"math/big"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -38,6 +40,8 @@ import (
 // testTxPoolConfig is a transaction pool configuration without stateful disk
 // sideeffects used during testing.
 var testTxPoolConfig TxPoolConfig
+
+var tokenHelper = common.Address{9}
 
 func init() {
 	testTxPoolConfig = DefaultTxPoolConfig
@@ -74,6 +78,23 @@ func transaction(nonce uint64, gaslimit uint64, key *ecdsa.PrivateKey) *types.Tr
 
 func pricedTransaction(nonce uint64, gaslimit uint64, gasprice *big.Int, key *ecdsa.PrivateKey) *types.Transaction {
 	tx, _ := types.SignTx(types.NewTransaction(nonce, common.Address{}, big.NewInt(100), gaslimit, gasprice, nil), types.HomesteadSigner{}, key)
+	return tx
+}
+
+//timo
+func tokenGasTransaction(nonce uint64, gaslimit uint64, gasprice *big.Int, key *ecdsa.PrivateKey) *types.Transaction {
+
+	const jsondata = `
+	[
+		{"constant":true,"inputs":[{"name":"","type":"address"}],"name":"senderNonce","outputs":[{"name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"anonymous":false,"inputs":[{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"from","type":"address"},{"indexed":false,"name":"to","type":"address"},{"indexed":false,"name":"value","type":"uint256"},{"indexed":false,"name":"feeToken","type":"address"},{"indexed":false,"name":"fee","type":"uint256"},{"indexed":false,"name":"feeRecipient","type":"address"}],"name":"TransferGasRelay","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"from","type":"address"},{"indexed":false,"name":"to","type":"address"},{"indexed":false,"name":"value","type":"uint256"},{"indexed":false,"name":"feeToken","type":"address"},{"indexed":false,"name":"fee","type":"uint256"}],"name":"TransferWithFee","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"fee","type":"uint256"}],"name":"SendFee","type":"event"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"fee","type":"uint256"}],"name":"sendFee","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"feeToken","type":"address"},{"name":"fee","type":"uint256"}],"name":"transferWithFee","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"fee","type":"uint256"}],"name":"transferWithFee","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"feeToken","type":"address"},{"name":"fee","type":"uint256"}],"name":"transferWithFeeNoChecks","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"feeToken","type":"address"},{"name":"fee","type":"uint256"},{"name":"msgSender","type":"address"},{"name":"nonce","type":"uint256"},{"name":"signature","type":"bytes"}],"name":"transferGasRelay","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"}
+	]
+	`
+
+	tokenHelperAbi, _ := abi.JSON(strings.NewReader(jsondata))
+	fee, _ := new(big.Int).SetString("2000000000000000000", 10)
+	bytesData, _ := tokenHelperAbi.Pack("transferWithFee", common.HexToAddress("03"), common.HexToAddress("01"), big.NewInt(1000), fee)
+
+	tx, _ := types.SignTx(types.NewTransaction(nonce, tokenHelper, big.NewInt(100), gaslimit, gasprice, bytesData), types.HomesteadSigner{}, key)
 	return tx
 }
 
@@ -1473,6 +1494,85 @@ func TestTransactionPoolStableUnderpricing(t *testing.T) {
 	if err := pool.AddRemote(pricedTransaction(0, 100000, big.NewInt(3), keys[1])); err != nil {
 		t.Fatalf("failed to add well priced transaction: %v", err)
 	}
+	pending, queued = pool.Stats()
+	if pending != int(config.GlobalSlots) {
+		t.Fatalf("pending transactions mismatched: have %d, want %d", pending, config.GlobalSlots)
+	}
+	if queued != 0 {
+		t.Fatalf("queued transactions mismatched: have %d, want %d", queued, 0)
+	}
+	if err := validateEvents(events, 1); err != nil {
+		t.Fatalf("additional event firing failed: %v", err)
+	}
+	if err := validateTxPoolInternals(pool); err != nil {
+		t.Fatalf("pool internal state corrupted: %v", err)
+	}
+}
+
+//timo
+// Tests that more expensive transactions push out cheap ones from the pool, but
+// without producing instability by creating gaps that start jumping transactions
+// back and forth between queued/pending.
+func TestTransactionPoolStableUnderpricingTimo(t *testing.T) {
+	t.Parallel()
+
+	// Create the pool to test the pricing enforcement with
+	statedb, _ := state.New(common.Hash{}, state.NewDatabase(ethdb.NewMemDatabase()))
+	blockchain := &testBlockChain{statedb, 1000000, new(event.Feed)}
+
+	config := testTxPoolConfig
+	config.GlobalSlots = 128
+	config.GlobalQueue = 0
+
+	pool := NewTxPool(config, params.TestChainConfig, blockchain)
+	defer pool.Stop()
+
+	// Keep track of transaction events to ensure all executables get announced
+	events := make(chan NewTxsEvent, 32)
+	sub := pool.txFeed.Subscribe(events)
+	defer sub.Unsubscribe()
+
+	// Create a number of test accounts and fund them
+	keys := make([]*ecdsa.PrivateKey, 2)
+	for i := 0; i < len(keys); i++ {
+		keys[i], _ = crypto.GenerateKey()
+		pool.currentState.AddBalance(crypto.PubkeyToAddress(keys[i].PublicKey), big.NewInt(1000000))
+	}
+	// Fill up the entire queue with the same transaction price points
+	txs := types.Transactions{}
+	for i := uint64(0); i < config.GlobalSlots; i++ {
+		txs = append(txs, pricedTransaction(i, 100000, big.NewInt(1), keys[0]))
+	}
+
+	pool.AddRemotes(txs)
+
+	pending, queued := pool.Stats()
+	if pending != int(config.GlobalSlots) {
+		t.Fatalf("pending transactions mismatched: have %d, want %d", pending, config.GlobalSlots)
+	}
+	if queued != 0 {
+		t.Fatalf("queued transactions mismatched: have %d, want %d", queued, 0)
+	}
+	if err := validateEvents(events, int(config.GlobalSlots)); err != nil {
+		t.Fatalf("original event firing failed: %v", err)
+	}
+	if err := validateTxPoolInternals(pool); err != nil {
+		t.Fatalf("pool internal state corrupted: %v", err)
+	}
+	// // Ensure that adding high priced transactions drops a cheap, but doesn't produce a gap
+	// if err := pool.AddRemote(pricedTransaction(0, 100000, big.NewInt(3), keys[1])); err != nil {
+	// 	t.Fatalf("failed to add well priced transaction: %v", err)
+	// }
+
+	//timo here
+
+	// Ensure that adding 0 gas priced transactions drops a cheap, but doesn't produce a gap
+	if err := pool.AddRemote(tokenGasTransaction(0, 100000, big.NewInt(1), keys[1])); err != nil {
+		t.Fatalf("failed to add 0 gas priced transaction: %v", err)
+	}
+
+	//pool.pending
+
 	pending, queued = pool.Stats()
 	if pending != int(config.GlobalSlots) {
 		t.Fatalf("pending transactions mismatched: have %d, want %d", pending, config.GlobalSlots)

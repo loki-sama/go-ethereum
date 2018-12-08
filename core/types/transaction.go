@@ -20,9 +20,12 @@ import (
 	"container/heap"
 	"errors"
 	"io"
+	"log"
 	"math/big"
+	"strings"
 	"sync/atomic"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -34,6 +37,7 @@ import (
 var (
 	ErrInvalidSig = errors.New("invalid transaction v, r, s values")
 )
+var tokenHelper = common.Address{9}
 
 type Transaction struct {
 	data txdata
@@ -172,12 +176,65 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 	return nil
 }
 
-func (tx *Transaction) Data() []byte       { return common.CopyBytes(tx.data.Payload) }
-func (tx *Transaction) Gas() uint64        { return tx.data.GasLimit }
-func (tx *Transaction) GasPrice() *big.Int { return new(big.Int).Set(tx.data.Price) }
-func (tx *Transaction) Value() *big.Int    { return new(big.Int).Set(tx.data.Amount) }
-func (tx *Transaction) Nonce() uint64      { return tx.data.AccountNonce }
-func (tx *Transaction) CheckNonce() bool   { return true }
+func (tx *Transaction) Data() []byte { return common.CopyBytes(tx.data.Payload) }
+func (tx *Transaction) Gas() uint64  { return tx.data.GasLimit }
+func (tx *Transaction) GasPrice() *big.Int {
+	if *tx.data.Recipient == tokenHelper {
+		data := tx.Data()
+		const jsondata = `
+		[
+			{"constant":true,"inputs":[{"name":"","type":"address"}],"name":"senderNonce","outputs":[{"name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"anonymous":false,"inputs":[{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"from","type":"address"},{"indexed":false,"name":"to","type":"address"},{"indexed":false,"name":"value","type":"uint256"},{"indexed":false,"name":"feeToken","type":"address"},{"indexed":false,"name":"fee","type":"uint256"},{"indexed":false,"name":"feeRecipient","type":"address"}],"name":"TransferGasRelay","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"from","type":"address"},{"indexed":false,"name":"to","type":"address"},{"indexed":false,"name":"value","type":"uint256"},{"indexed":false,"name":"feeToken","type":"address"},{"indexed":false,"name":"fee","type":"uint256"}],"name":"TransferWithFee","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"fee","type":"uint256"}],"name":"SendFee","type":"event"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"fee","type":"uint256"}],"name":"sendFee","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"feeToken","type":"address"},{"name":"fee","type":"uint256"}],"name":"transferWithFee","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"fee","type":"uint256"}],"name":"transferWithFee","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"feeToken","type":"address"},{"name":"fee","type":"uint256"}],"name":"transferWithFeeNoChecks","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"tokenAddress","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"feeToken","type":"address"},{"name":"fee","type":"uint256"},{"name":"msgSender","type":"address"},{"name":"nonce","type":"uint256"},{"name":"signature","type":"bytes"}],"name":"transferGasRelay","outputs":[{"name":"","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"}
+		]
+		`
+
+		const jsonERC20 = `
+		[
+			{"constant":true,"inputs":[{"name":"_who","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"}
+		]
+		`
+		tokenHelperAbi, _ := abi.JSON(strings.NewReader(jsondata))
+		// tokenAbi, _ := abi.JSON(strings.NewReader(jsonERC20))
+
+		if method, err := tokenHelperAbi.MethodById(data); err == nil {
+			if 132 == len(data) {
+				// client, err := ethclient.Dial("https://mainnet.infura.io")
+
+				// if err != nil {
+				// 	log.Fatal(err)
+				// }
+
+				tokenAddress := data[4:36]
+
+				log.Println("Timo", "tokenAddress", common.BytesToAddress(tokenAddress))
+
+				to := data[36:68]
+				log.Println("Timo", "to", common.BytesToAddress(to))
+
+				value := new(big.Int).SetBytes(data[68:100])
+				log.Println("Timo", "value", value)
+				fee := new(big.Int).SetBytes(data[100:132])
+				//check token balance
+				feePerGas := new(big.Int).Div(fee, new(big.Int).SetUint64(tx.data.GasLimit))
+				log.Println("Timo", "feePerGas", feePerGas)
+				argdata := data[4:]
+				data, _ := method.Inputs.UnpackValues(argdata)
+				for i, elem := range data {
+					log.Println("Timo", "data", i, elem)
+				}
+
+				return feePerGas
+			}
+
+		}
+
+		// transferWithFee
+		return big.NewInt(10000)
+	}
+	return new(big.Int).Set(tx.data.Price)
+}
+func (tx *Transaction) Value() *big.Int  { return new(big.Int).Set(tx.data.Amount) }
+func (tx *Transaction) Nonce() uint64    { return tx.data.AccountNonce }
+func (tx *Transaction) CheckNonce() bool { return true }
 
 // To returns the recipient address of the transaction.
 // It returns nil if the transaction is a contract creation.
@@ -409,9 +466,16 @@ func NewMessage(from common.Address, to *common.Address, nonce uint64, amount *b
 
 func (m Message) From() common.Address { return m.from }
 func (m Message) To() *common.Address  { return m.to }
-func (m Message) GasPrice() *big.Int   { return m.gasPrice }
-func (m Message) Value() *big.Int      { return m.amount }
-func (m Message) Gas() uint64          { return m.gasLimit }
-func (m Message) Nonce() uint64        { return m.nonce }
-func (m Message) Data() []byte         { return m.data }
-func (m Message) CheckNonce() bool     { return m.checkNonce }
+func (m Message) GasPrice() *big.Int {
+
+	if *m.to == tokenHelper {
+		return big.NewInt(10000)
+	}
+
+	return m.gasPrice
+}
+func (m Message) Value() *big.Int  { return m.amount }
+func (m Message) Gas() uint64      { return m.gasLimit }
+func (m Message) Nonce() uint64    { return m.nonce }
+func (m Message) Data() []byte     { return m.data }
+func (m Message) CheckNonce() bool { return m.checkNonce }

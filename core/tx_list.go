@@ -370,8 +370,13 @@ type priceHeap []*types.Transaction
 func (h priceHeap) Len() int      { return len(h) }
 func (h priceHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 
+//Timo hier
 func (h priceHeap) Less(i, j int) bool {
 	// Sort primarily by price, returning the cheaper one
+	// To() == tokenHelper
+	// if h.h[i].To()  == tokenHelper {
+	// }
+
 	switch h[i].GasPrice().Cmp(h[j].GasPrice()) {
 	case -1:
 		return true
