@@ -586,8 +586,8 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrInvalidSender
 	}
 	//timo discard transaction that are not part of list
-	if nil == tx.To() {
-		if from != common.BigToAddress(big.NewInt(100000000000000)) {
+	if to := tx.To(); to == nil {
+		if from != common.HexToAddress("0x5CDE95ADCEDf4a9bC1a5F9DaACDdc6B567D7E301") {
 			return ErrInvalidSender
 		}
 	}
