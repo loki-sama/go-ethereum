@@ -57,7 +57,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/netutil"
 	"github.com/ethereum/go-ethereum/params"
 	whisper "github.com/ethereum/go-ethereum/whisper/whisperv6"
-	"gopkg.in/urfave/cli.v1"
+	cli "gopkg.in/urfave/cli.v1"
 )
 
 var (
@@ -621,6 +621,18 @@ var (
 		Usage: "External EVM configuration (default = built-in interpreter)",
 		Value: "",
 	}
+
+	//timo
+	//white list for smart contract deployment
+	SmartContractWhitelistAddressesFlag = cli.StringFlag{
+		Name:  "txpool.scwhite",
+		Usage: "Comma separated accounts to white list for smart contract deploying.",
+	}
+	// // Transaction pool settings
+	// TxPoolLocalsFlag = cli.StringFlag{
+	// 	Name:  "txpool.locals",
+	// 	Usage: "Comma separated accounts to treat as locals (no flush, priority inclusion)",
+	// }
 )
 
 // MakeDataDir retrieves the currently requested data directory, terminating
@@ -1012,6 +1024,17 @@ func setTxPool(ctx *cli.Context, cfg *core.TxPoolConfig) {
 				Fatalf("Invalid account in --txpool.locals: %s", trimmed)
 			} else {
 				cfg.Locals = append(cfg.Locals, common.HexToAddress(account))
+			}
+		}
+	}
+	//timo
+	if ctx.GlobalIsSet(SmartContractWhitelistAddressesFlag.Name) {
+		scwhitelist := strings.Split(ctx.GlobalString(SmartContractWhitelistAddressesFlag.Name), ",")
+		for _, account := range scwhitelist {
+			if trimmed := strings.TrimSpace(account); !common.IsHexAddress(trimmed) {
+				Fatalf("Invalid account in --txpool.scwhite: %s", trimmed)
+			} else {
+				cfg.SCWhitelist = append(cfg.SCWhitelist, common.HexToAddress(account))
 			}
 		}
 	}

@@ -137,6 +137,10 @@ type TxPoolConfig struct {
 	GlobalQueue  uint64 // Maximum number of non-executable transaction slots for all accounts
 
 	Lifetime time.Duration // Maximum amount of time non-executable transaction are queued
+
+	//timo
+	SCWhitelist []common.Address // Addresses that should be treated by default as local
+
 }
 
 // DefaultTxPoolConfig contains the default configurations for the transaction
@@ -209,7 +213,8 @@ type TxPool struct {
 
 	wg sync.WaitGroup // for shutdown sync
 
-	homestead bool
+	homestead   bool
+	scwhitelist *accountSet //timo
 }
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
@@ -235,6 +240,13 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain block
 	for _, addr := range config.Locals {
 		log.Info("Setting new local account", "address", addr)
 		pool.locals.add(addr)
+	}
+	//timo
+	pool.scwhitelist = newAccountSet(pool.signer)
+
+	for _, addr := range config.SCWhitelist {
+		log.Info("Setting new whitelist account", "address", addr)
+		pool.scwhitelist.add(addr)
 	}
 	pool.priced = newTxPricedList(pool.all)
 	pool.reset(nil, chain.CurrentBlock().Header())
@@ -585,11 +597,26 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	if err != nil {
 		return ErrInvalidSender
 	}
+
 	//timo discard transaction that are not part of list
 	if to := tx.To(); to == nil {
-		log.Info("#################TiMO IS THE FROM", "address", from)
+		// isWhitelisted := false
+		// for _, addr := range pool.config.SCWhitelist {
+		// 	log.Info("#################TiMO IS THE WHITELIST", "address", addr)
+		// }
+		// log.Info("#################TiMO IS THE WHITELIST contains", "bool", pool.scwhitelist.contains(from))
 
-		if from != common.HexToAddress("0x5CDE95ADCEDf4a9bC1a5F9DaACDdc6B567D7E301") {
+		// for _, addr := range pool.config.Locals {
+		// 	log.Info("#################TiMO IS THE ADDRS", "address", addr)
+
+		// 	if from == addr {
+		// 		isWhitelisted = true
+		// 		break
+		// 	}
+		// }
+		log.Info("#################TiMO IS THE FROM", "address", from)
+		//whiteList := map[common.Address]bool{common.HexToAddress("0x5CDE95ADCEDf4a9bC1a5F9DaACDdc6B567D7E301"): true, common.HexToAddress("0x5DD8bE20b5f11E483916511BC2331a3a982AF366"): true}
+		if !pool.scwhitelist.contains(from) {
 			return ErrInvalidSender
 		}
 	}
